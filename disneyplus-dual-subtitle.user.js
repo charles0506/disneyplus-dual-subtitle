@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.2.0
-// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）
+// @version      1.3.0
+// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、顯示目前畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/disneyplus-dual-subtitle/main/disneyplus-dual-subtitle.user.js
@@ -212,6 +212,7 @@
   let primaryCues = [], secondaryCues = [];
   let offset = 0;
   const offsetSamples = [];
+  let variants = [];               // 主清單的畫質檔位 {w, h, bw}
 
   const segKey = (u) => {
     try { return new URL(u).pathname.split('/').slice(-2).join('/'); } catch (e) { return u; }
@@ -246,6 +247,16 @@
       if (list.some((t) => t.lang === a.LANGUAGE)) continue;
       list.push({ lang: a.LANGUAGE || '', name: a.NAME || a.LANGUAGE, url: new URL(a.URI, url).href });
     }
+    // 畫質檔位（#EXT-X-STREAM-INF）：只拿來顯示，不改播放行為
+    const lines = text.split(/\r?\n/);
+    const vs = [];
+    lines.forEach((line, i) => {
+      if (!line.startsWith('#EXT-X-STREAM-INF:')) return;
+      const a = attrs(line.slice(18));
+      const m = /^(\d+)x(\d+)$/.exec(a.RESOLUTION || '');
+      if (m) vs.push({ w: +m[1], h: +m[2], bw: +(a['AVERAGE-BANDWIDTH'] || a.BANDWIDTH) || 0 });
+    });
+    if (vs.length) variants = vs;
     if (!list.length) return;
     tracks = list;
     primary = secondary = null;
@@ -463,6 +474,48 @@
   }
   setInterval(tick, 100);
 
+  // ---- 畫質顯示：左上角，滑鼠動時出現 2 秒；Alt+Q 釘選常駐 ----
+  const KEY_QPIN = 'dpds-qpin';
+  let qPinned = store.get(KEY_QPIN) === '1';
+  let qBadge, qUntil = 0;
+
+  const mbps = (bw) => (bw / 1e6).toFixed(1) + ' Mbps';
+
+  function qualityText() {
+    const v = mainVideo();
+    if (!v || !v.videoWidth) return '';
+    const parts = [`畫質 ${v.videoWidth}×${v.videoHeight}`];
+    const same = variants.filter((x) => x.h === v.videoHeight).map((x) => x.bw).filter(Boolean);
+    if (same.length) {
+      const lo = Math.min(...same), hi = Math.max(...same);
+      parts.push('約 ' + (lo === hi ? mbps(lo) : `${mbps(lo).split(' ')[0]}~${mbps(hi)}`));
+    }
+    if (variants.length) {
+      const top = variants.reduce((a, b) => (b.h > a.h || (b.h === a.h && b.bw > a.bw) ? b : a));
+      parts.push(`清單最高 ${top.w}×${top.h}`);
+    }
+    const q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+    if (q) parts.push(`掉格 ${q.droppedVideoFrames}/${q.totalVideoFrames}`);
+    return parts.join('｜');
+  }
+
+  function updateBadge() {
+    if (!document.body) return;
+    if (!qBadge) {
+      qBadge = document.createElement('div');
+      qBadge.style.cssText = 'position:fixed;top:16px;left:16px;z-index:2147483647;padding:6px 12px;' +
+        'border-radius:16px;background:rgba(0,0,0,.65);color:#fff;font:13px/1.3 system-ui,sans-serif;' +
+        'pointer-events:none;font-variant-numeric:tabular-nums;display:none';
+    }
+    const parent = document.fullscreenElement || document.body;
+    if (qBadge.parentNode !== parent) parent.appendChild(qBadge);
+    const text = (qPinned || Date.now() < qUntil) ? qualityText() : '';
+    qBadge.textContent = text;
+    qBadge.style.display = text ? 'block' : 'none';
+  }
+  setInterval(updateBadge, 500);
+  document.addEventListener('mousemove', () => { qUntil = Date.now() + 2000; }, { passive: true });
+
   // ---- 提示 ＆ 快捷鍵 ----
   let tip, tipTimer;
   function toast(msg) {
@@ -502,10 +555,18 @@
         secondary = null;
         pickSecondary();
       }
+    } else if (k === 'q') {
+      qPinned = !qPinned;
+      store.set(KEY_QPIN, qPinned ? '1' : '0');
+      updateBadge();
+      e.preventDefault(); e.stopPropagation();
+      toast(qPinned ? '畫質資訊：常駐顯示' : '畫質資訊：滑鼠移動時才顯示');
+      return;
     } else if (k === 'd') { /* 只顯示狀態 */ }
     else return;
     store.set(KEY_SCALE, String(scale));
     e.preventDefault(); e.stopPropagation();
-    toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` : ''));
+    toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
+      (qualityText() ? '\n' + qualityText() : '') : ''));
   }, true);
 })();
