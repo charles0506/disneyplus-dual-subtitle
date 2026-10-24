@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.3.2
-// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、顯示目前畫質
+// @version      1.4.0
+// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/disneyplus-dual-subtitle/main/disneyplus-dual-subtitle.user.js
@@ -213,6 +213,9 @@
   let offset = 0;
   const offsetSamples = [];
   let variants = [];               // 主清單的畫質檔位 {w, h, bw}
+  let samples = [], playSec = 0, firstMaxSec = null; // 畫質曲線：每播放 1 秒記一次 {s, h}
+  let masterVia = '';              // 主清單怎麼拿到的：fetch / xhr（可改寫）或 側錄（只能讀）
+  let lockMax = store.get('dpds-lock') === '1', lockApplied = false;
 
   const segKey = (u) => {
     try { return new URL(u).pathname.split('/').slice(-2).join('/'); } catch (e) { return u; }
@@ -247,7 +250,8 @@
       if (list.some((t) => t.lang === a.LANGUAGE)) continue;
       list.push({ lang: a.LANGUAGE || '', name: a.NAME || a.LANGUAGE, url: new URL(a.URI, url).href });
     }
-    // 畫質檔位（#EXT-X-STREAM-INF）：只拿來顯示，不改播放行為
+    // 畫質檔位（#EXT-X-STREAM-INF）：顯示用，讀的是改寫前的原始清單
+    if (!seenMasterText.has(text)) { seenMasterText.add(text); samples = []; playSec = 0; firstMaxSec = null; }
     const lines = text.split(/\r?\n/);
     const vs = [];
     lines.forEach((line, i) => {
@@ -344,28 +348,77 @@
       .observe({ type: 'resource', buffered: true });
   } catch (e) {}
 
-  // 清單網址不一定以 .m3u8 結尾，也可能沒進 resource timing：再看 fetch / XHR 回應內容
+  // 清單網址不一定以 .m3u8 結尾，也可能沒進 resource timing：再看 fetch / XHR 回應內容。
+  // 攔得到內容時才能「鎖定最高畫質」：把低於最高解析度的 #EXT-X-STREAM-INF 檔位刪掉再交給播放器。
   const isMaster = (t) => typeof t === 'string' && t.startsWith('#EXTM3U') && t.includes('TYPE=SUBTITLES');
+  const seenMasterText = new Set();
+
+  function keepTop(text) {
+    const lines = text.split(/\r?\n/);
+    const resH = (l) => { const m = /RESOLUTION=\d+x(\d+)/.exec(l); return m ? +m[1] : 0; };
+    const maxH = Math.max(0, ...lines.filter((l) => l.startsWith('#EXT-X-STREAM-INF:')).map(resH));
+    if (!maxH) return text;
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (l.startsWith('#EXT-X-STREAM-INF:') && resH(l) && resH(l) < maxH) {
+        while (i + 1 < lines.length && (!lines[i + 1] || lines[i + 1].startsWith('#'))) i++;
+        i++; // 連同下一行的檔位網址一起刪
+        continue;
+      }
+      out.push(l);
+    }
+    return out.join('\n');
+  }
+
+  function onMasterText(url, t, via) {
+    masterVia = via;
+    onM3u8(url, t);
+    if (!lockMax) return t;
+    const t2 = keepTop(t);
+    if (t2 !== t) lockApplied = true;
+    return t2;
+  }
+
   const origFetch = window.fetch;
   window.fetch = function (input) {
     const p = origFetch.apply(this, arguments);
     const url = typeof input === 'string' ? input : input && input.url;
-    if (url && !ours.has(url)) {
-      p.then((r) => {
-        const ct = r.headers.get('content-type') || '';
-        if (/mpegurl|m3u8/i.test(ct + url)) r.clone().text().then((t) => isMaster(t) && onM3u8(r.url || url, t)).catch(() => {});
-      }).catch(() => {});
-    }
-    return p;
+    if (!url || ours.has(url)) return p;
+    return p.then(async (r) => {
+      const ct = r.headers.get('content-type') || '';
+      if (!/mpegurl|m3u8/i.test(ct + url)) return r;
+      let t;
+      try { t = await r.clone().text(); } catch (e) { return r; }
+      if (!isMaster(t)) return r;
+      const t2 = onMasterText(r.url || url, t, 'fetch');
+      if (t2 === t) return r;
+      const h = new Headers(r.headers);
+      h.delete('content-length');
+      h.delete('content-encoding');
+      const nr = new Response(t2, { status: r.status, statusText: r.statusText, headers: h });
+      Object.defineProperty(nr, 'url', { value: r.url }); // 播放器靠它解析相對網址
+      return nr;
+    });
   };
+
+  const xhrText = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText');
+  const xhrResp = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
   const origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {
-    this.addEventListener('load', () => {
-      try {
-        if ((this.responseType === '' || this.responseType === 'text') && isMaster(this.responseText)) {
-          onM3u8(this.responseURL || String(url), this.responseText);
-        }
-      } catch (e) {}
+    const xhr = this;
+    let raw = null, fixed = null;
+    const fix = (t) => {
+      if (typeof t !== 'string' || xhr.readyState !== 4 || !isMaster(t)) return t;
+      if (t !== raw) { raw = t; fixed = onMasterText(xhr.responseURL || String(url), t, 'xhr'); }
+      return fixed;
+    };
+    try {
+      Object.defineProperty(xhr, 'responseText', { configurable: true, get() { return fix(xhrText.get.call(xhr)); } });
+      Object.defineProperty(xhr, 'response', { configurable: true, get() { return fix(xhrResp.get.call(xhr)); } });
+    } catch (e) {}
+    xhr.addEventListener('load', () => {
+      try { if (xhr.responseType === '' || xhr.responseType === 'text') void xhr.responseText; } catch (e) {}
     });
     return origOpen.apply(this, arguments);
   };
@@ -512,19 +565,100 @@
     return parts.join('｜');
   }
 
+  // 畫質曲線：每播放 1 秒記一次解析度（暫停不記），看多久才爬到最高
+  const maxH = () => Math.max(0, ...variants.map((x) => x.h));
+  setInterval(() => {
+    const v = mainVideo();
+    if (!v || v.paused || !v.videoHeight) return;
+    samples.push({ s: playSec, h: v.videoHeight });
+    if (samples.length > 600) samples.shift(); // 只留最近 10 分鐘
+    if (firstMaxSec === null && maxH() && v.videoHeight >= maxH()) firstMaxSec = playSec;
+    playSec++;
+  }, 1000);
+
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+  function drawChart(cv) {
+    const W = 320, H = 76, dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr)) {
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    }
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    if (!samples.length) return;
+    // 縱軸用檔位等距排列（不用像素比例），480 → 720 的跳動才看得清楚
+    const levels = [...new Set([...variants.map((x) => x.h), ...samples.map((x) => x.h)])].sort((a, b) => a - b);
+    const top = levels[levels.length - 1];
+    const L = 40, R = 6, T = 6, B = 16;
+    const y = (h) => levels.length === 1 ? T + (H - T - B) / 2
+      : T + (H - T - B) * (1 - levels.indexOf(h) / (levels.length - 1));
+    g.font = '10px system-ui,sans-serif';
+    g.textBaseline = 'middle';
+    for (const h of levels) {
+      const yy = Math.round(y(h)) + 0.5;
+      g.strokeStyle = h === top ? 'rgba(102,187,106,.7)' : 'rgba(255,255,255,.15)';
+      g.setLineDash(h === top ? [4, 3] : []);
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(L, yy); g.lineTo(W - R, yy); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = h === top ? '#81c784' : 'rgba(255,255,255,.7)';
+      g.fillText(h + 'p', 4, yy);
+    }
+    const s0 = samples[0].s, sN = samples[samples.length - 1].s;
+    const s1 = Math.max(sN, s0 + 60); // 至少一分鐘寬，剛開播時不會擠成一團
+    const x = (s) => L + (W - L - R) * (s - s0) / (s1 - s0);
+    g.strokeStyle = '#4fc3f7';
+    g.lineWidth = 2;
+    g.beginPath();
+    samples.forEach((p, i) => {
+      if (i === 0) g.moveTo(x(p.s), y(p.h));
+      else { g.lineTo(x(p.s), y(samples[i - 1].h)); g.lineTo(x(p.s), y(p.h)); }
+    });
+    g.stroke();
+    g.fillStyle = 'rgba(255,255,255,.6)';
+    g.textBaseline = 'alphabetic';
+    g.fillText(fmt(s0), L, H - 3);
+    g.textAlign = 'right';
+    g.fillText('播放 ' + fmt(sN), W - R, H - 3);
+    g.textAlign = 'left';
+  }
+
+  function chartSummary() {
+    const m = maxH();
+    if (!m || !samples.length) return '';
+    const atMax = samples.filter((p) => p.h >= m).length;
+    const pct = Math.round(atMax / samples.length * 100);
+    return firstMaxSec !== null
+      ? `播放 ${fmt(firstMaxSec)} 後達到最高 ${m}p｜最近 ${pct}% 時間在最高`
+      : `尚未達到最高 ${m}p（已播 ${fmt(playSec)}）`;
+  }
+
+  let qText, qCanvas, qSum;
   function updateBadge() {
     if (!document.body) return;
     if (!qBadge) {
       qBadge = document.createElement('div');
-      qBadge.style.cssText = 'position:fixed;top:52px;right:16px;z-index:2147483647;padding:6px 12px;' +
-        'border-radius:16px;background:rgba(0,0,0,.65);color:#fff;font:14px/1.2 system-ui,sans-serif;' +
+      qBadge.style.cssText = 'position:fixed;top:52px;right:16px;z-index:2147483647;padding:6px 10px;' +
+        'border-radius:12px;background:rgba(0,0,0,.65);color:#fff;font:14px/1.3 system-ui,sans-serif;' +
         'pointer-events:none;font-variant-numeric:tabular-nums;white-space:nowrap;display:none';
+      qText = document.createElement('div');
+      qCanvas = document.createElement('canvas');
+      qCanvas.style.cssText = 'display:block;margin-top:4px';
+      qSum = document.createElement('div');
+      qSum.style.cssText = 'font-size:12px;color:#ccc';
+      qBadge.append(qText, qCanvas, qSum);
     }
     const parent = document.fullscreenElement || document.body;
     if (qBadge.parentNode !== parent) parent.appendChild(qBadge);
     const text = (qPinned || Date.now() < qUntil) ? qualityText() : '';
-    qBadge.textContent = text;
     qBadge.style.display = text ? 'block' : 'none';
+    if (!text) return;
+    qText.textContent = text;
+    qCanvas.style.display = samples.length ? 'block' : 'none';
+    if (samples.length) drawChart(qCanvas);
+    qSum.textContent = chartSummary() + (lockMax ? (lockApplied ? '｜已鎖定最高' : '｜鎖定未生效') : '');
   }
   setInterval(updateBadge, 500);
   document.addEventListener('mousemove', () => { qUntil = Date.now() + 2000; }, { passive: true });
@@ -575,11 +709,19 @@
       e.preventDefault(); e.stopPropagation();
       toast(qPinned ? '畫質資訊：常駐顯示' : '畫質資訊：滑鼠移動時才顯示');
       return;
+    } else if (k === 'h') {
+      lockMax = !lockMax;
+      store.set('dpds-lock', lockMax ? '1' : '0');
+      e.preventDefault(); e.stopPropagation();
+      toast(lockMax ? '鎖定最高畫質：開\n重新整理頁面後生效；網速不夠會一直緩衝' : '鎖定最高畫質：關\n重新整理頁面後恢復自動畫質');
+      return;
     } else if (k === 'd') { /* 只顯示狀態 */ }
     else return;
     store.set(KEY_SCALE, String(scale));
     e.preventDefault(); e.stopPropagation();
+    const via = { fetch: 'fetch（可鎖畫質）', xhr: 'XHR（可鎖畫質）', '': '側錄（無法鎖畫質）' }[masterVia];
+    const lock = lockMax ? (lockApplied ? '已套用' : '開，但未生效') : '關';
     toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
-      (qualityText() ? '\n' + qualityText() : '') : ''));
+      (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` : ''));
   }, true);
 })();
