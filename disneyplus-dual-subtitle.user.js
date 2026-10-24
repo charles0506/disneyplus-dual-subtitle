@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.0
+// @version      1.4.1
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -216,6 +216,20 @@
   let samples = [], playSec = 0, firstMaxSec = null; // 畫質曲線：每播放 1 秒記一次 {s, h}
   let masterVia = '';              // 主清單怎麼拿到的：fetch / xhr（可改寫）或 側錄（只能讀）
   let lockMax = store.get('dpds-lock') === '1', lockApplied = false;
+
+  // 記下 Disney 實際建立的版權保護（播放器可能先試好幾種，真正用的是 createMediaKeys 那個）。
+  // Widevine → 網頁通常只給 720p；PlayReady 3000 是硬體級，才有機會更高。
+  let drmUsed = '';
+  try {
+    const origCreate = MediaKeySystemAccess.prototype.createMediaKeys;
+    MediaKeySystemAccess.prototype.createMediaKeys = function () {
+      try {
+        const vc = (this.getConfiguration().videoCapabilities || [])[0] || {};
+        drmUsed = this.keySystem + (vc.robustness ? `（${vc.robustness}）` : '');
+      } catch (e) { drmUsed = this.keySystem; }
+      return origCreate.apply(this, arguments);
+    };
+  } catch (e) {}
 
   const segKey = (u) => {
     try { return new URL(u).pathname.split('/').slice(-2).join('/'); } catch (e) { return u; }
@@ -722,6 +736,7 @@
     const via = { fetch: 'fetch（可鎖畫質）', xhr: 'XHR（可鎖畫質）', '': '側錄（無法鎖畫質）' }[masterVia];
     const lock = lockMax ? (lockApplied ? '已套用' : '開，但未生效') : '關';
     toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
-      (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` : ''));
+      (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
+      `\n版權保護：${drmUsed || '尚未偵測到'}` : ''));
   }, true);
 })();
