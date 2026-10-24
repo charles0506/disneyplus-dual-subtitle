@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.1.0
-// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、原字幕上方加第二語言（中配英、英配中）
+// @version      1.2.0
+// @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
 // @updateURL    https://raw.githubusercontent.com/charles0506/disneyplus-dual-subtitle/main/disneyplus-dual-subtitle.user.js
@@ -190,17 +190,17 @@
   // 1. PerformanceObserver 側錄頁面載入的 .m3u8 / .vtt 網址
   // 2. 自己重抓 m3u8，含 #EXT-X-MEDIA:TYPE=SUBTITLES 的就是主清單，列出各語言字幕
   // 3. 頁面正在載的 .vtt 屬於哪一軌 = 目前顯示的語言；另一語言整軌抓下來
-  // 4. 依 video.currentTime（加上用原字幕文字比對算出的時間差）把第二語言疊在原字幕上方
-  // 原字幕畫在 .hive-subtitle-renderer-cue-window，放大用 CSS zoom。
+  // 4. 依 video.currentTime（加上用原字幕文字比對算出的時間差）找出第二語言當下那句
+  // 原字幕畫在 .hive-subtitle-renderer-cue-window：藏起來但照讀文字，和第二語言一起自己畫成兩行。
 
-  const KEY_SCALE = 'dpds-scale', KEY_ON = 'dpds-on', KEY_LANG = 'dpds-lang';
+  const KEY_SCALE = 'dpds-scale2', KEY_ON = 'dpds-on', KEY_LANG = 'dpds-lang';
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
   };
 
   let scale = parseFloat(store.get(KEY_SCALE));
-  if (!(scale >= 0.8 && scale <= 3)) scale = 1.4;
+  if (!(scale >= 0.5 && scale <= 3)) scale = 1; // 1.2.0 起改成自畫字幕的倍率，換 key 重設
   let dualOn = store.get(KEY_ON) !== '0';
   let prefLang = store.get(KEY_LANG) || '';
 
@@ -360,9 +360,9 @@
   };
 
   // ---- 找原字幕／影片（可能在 shadow DOM 裡） ----
+  // 排版照自製 Netflix 雙字幕插件：原生字幕藏起來（仍讀它的文字），自己畫兩行，
+  // 中文在上（粗、大）、英文在下（細、小），透明底黑描邊，貼近影片底部；暫停時隱藏。
   let cueRoot = null; // 含字幕的 document 或 shadowRoot
-  const styledRoots = new WeakSet();
-  const CSS = '.hive-subtitle-renderer-cue-window{zoom:var(--dpds-scale,1.4)!important}';
 
   function findRoot(root) {
     if (root.querySelector('.hive-subtitle-renderer-wrapper')) return root;
@@ -370,14 +370,6 @@
       if (el.shadowRoot) { const r = findRoot(el.shadowRoot); if (r) return r; }
     }
     return null;
-  }
-
-  function injectStyle(root) {
-    if (styledRoots.has(root)) return;
-    styledRoots.add(root);
-    const st = document.createElement('style');
-    st.textContent = CSS;
-    (root === document ? document.head || document.documentElement : root).appendChild(st);
   }
 
   function mainVideo() {
@@ -390,13 +382,20 @@
   }
 
   // ---- 疊加層 ----
-  let box = null;
+  const LINE = 'display:block;margin:0.05em auto;padding:0 0.3em;white-space:pre-line;line-height:1.25;' +
+    'text-shadow:-1.5px -1.5px 0 #000,1.5px -1.5px 0 #000,-1.5px 1.5px 0 #000,1.5px 1.5px 0 #000,0 0 6px rgba(0,0,0,.6)';
+  let box = null, topEl, botEl;
   function ensureBox() {
     if (!box) {
       box = document.createElement('div');
       box.style.cssText = 'position:fixed;z-index:2147483646;pointer-events:none;text-align:center;' +
-        'transform:translateX(-50%);white-space:pre-line;color:#fff;font-family:Arial,sans-serif;' +
-        'line-height:1.25;text-shadow:0 0 4px #000,0 0 2px #000;display:none';
+        'transform:translateX(-50%);color:#fff;' +
+        "font-family:'Microsoft JhengHei','PingFang TC',Arial,sans-serif;display:none";
+      topEl = document.createElement('div');
+      botEl = document.createElement('div');
+      topEl.style.cssText = LINE + ';font-weight:700';
+      botEl.style.cssText = LINE + ';font-weight:400';
+      box.append(topEl, botEl);
     }
     const parent = document.fullscreenElement || document.body;
     if (parent && box.parentNode !== parent) parent.appendChild(box);
@@ -407,19 +406,22 @@
   let lastPrimaryText = '', lastScan = 0;
 
   function tick() {
-    document.documentElement.style.setProperty('--dpds-scale', String(scale));
     if ((!cueRoot || !cueRoot.querySelector('.hive-subtitle-renderer-wrapper')) && Date.now() - lastScan > 2000) {
       lastScan = Date.now(); // 整頁掃 shadow DOM 很貴，找不到時 2 秒才再掃
       cueRoot = findRoot(document);
     }
-    if (cueRoot) injectStyle(cueRoot);
 
     const v = mainVideo();
     const b = ensureBox();
-    if (!v || !b) return;
+    if (!v || !b || !cueRoot) { if (b) b.style.display = 'none'; return; }
 
-    const cueEls = cueRoot ? [...cueRoot.querySelectorAll('.hive-subtitle-renderer-cue-window')] : [];
-    const ptext = cueEls.map((e) => e.textContent).join('\n').trim();
+    // 藏原生字幕：用 visibility 讓文字還在 DOM 裡可讀
+    cueRoot.querySelectorAll('.hive-subtitle-renderer-wrapper').forEach((w) => {
+      if (w.style.visibility !== 'hidden') w.style.visibility = 'hidden';
+    });
+
+    const cueEls = [...cueRoot.querySelectorAll('.hive-subtitle-renderer-cue-window')];
+    const ptext = cueEls.map((e) => e.innerText || e.textContent).join('\n').trim();
 
     // 用原字幕剛出現的那一刻校正時間差（只用整軌唯一、夠長的句子）
     if (ptext && ptext !== lastPrimaryText && primaryCues.length) {
@@ -437,19 +439,26 @@
     lastPrimaryText = ptext;
 
     const t = v.currentTime + offset;
-    const text = dualOn ? secondaryCues.filter((c) => c.start <= t && t < c.end).map((c) => c.text).join('\n') : '';
-    if (!text) { b.style.display = 'none'; return; }
+    const stext = dualOn ? secondaryCues.filter((c) => c.start <= t && t < c.end).map((c) => c.text).join('\n') : '';
+
+    // 中文永遠在上排：原字幕是中文 → 上原下副；原字幕是英文 → 上副下原
+    const primaryZh = !primary || /^zh/i.test(primary.lang);
+    const zhText = primaryZh ? ptext : stext;
+    const otherText = primaryZh ? stext : ptext;
+
+    if (v.paused || (!zhText && !otherText)) { b.style.display = 'none'; return; }
 
     const vr = v.getBoundingClientRect();
-    b.textContent = text;
-    b.style.fontSize = Math.round(vr.height * 0.036 * scale) + 'px';
-    b.style.maxWidth = Math.round(vr.width * 0.9) + 'px';
+    const zhPx = Math.max(20, vr.height * 0.05) * scale;
+    topEl.textContent = zhText;
+    botEl.textContent = otherText;
+    topEl.style.display = zhText ? 'block' : 'none';
+    botEl.style.display = otherText ? 'block' : 'none';
+    topEl.style.fontSize = Math.round(zhPx) + 'px';
+    botEl.style.fontSize = Math.round(zhPx * 0.72) + 'px';
+    b.style.width = Math.round(vr.width * 0.92) + 'px';
     b.style.left = Math.round(vr.left + vr.width / 2) + 'px';
-    let bottomY = vr.bottom - vr.height * 0.12;
-    const rects = cueEls.map((e) => e.getBoundingClientRect()).filter((r) => r.height > 0);
-    if (rects.length) bottomY = Math.min(...rects.map((r) => r.top)) - 4;
-    b.style.top = '';
-    b.style.bottom = Math.round(window.innerHeight - bottomY) + 'px';
+    b.style.bottom = Math.round(window.innerHeight - vr.bottom + vr.height * 0.08) + 'px';
     b.style.display = 'block';
   }
   setInterval(tick, 100);
@@ -481,7 +490,7 @@
     if (!e.altKey || e.ctrlKey || e.metaKey) return;
     const k = e.key.toLowerCase();
     if (k === '=' || k === '+') scale = Math.min(3, +(scale + 0.1).toFixed(1));
-    else if (k === '-') scale = Math.max(0.8, +(scale - 0.1).toFixed(1));
+    else if (k === '-') scale = Math.max(0.5, +(scale - 0.1).toFixed(1));
     else if (k === 's') { dualOn = !dualOn; store.set(KEY_ON, dualOn ? '1' : '0'); }
     else if (k === 'l') {
       const others = tracks.filter((t) => t !== primary);
