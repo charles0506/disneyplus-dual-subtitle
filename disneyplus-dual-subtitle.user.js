@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.3.1
+// @version      1.3.2
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、顯示目前畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -375,10 +375,25 @@
   // 中文在上（粗、大）、英文在下（細、小），透明底黑描邊，貼近影片底部；暫停時隱藏。
   let cueRoot = null; // 含字幕的 document 或 shadowRoot
 
+  // 藏原生字幕要用樣式規則：Disney 每句都重建元素，逐一改 style 會慢一拍、先閃一下。
+  // 用 adoptedStyleSheets 掛在 root 上：插 <style> 會被重繪時的 innerHTML 清空一起刪掉。
+  // visibility 讓文字仍在 DOM 裡可讀。
+  const hideSheet = new CSSStyleSheet();
+  hideSheet.replaceSync('.hive-subtitle-renderer-wrapper,.hive-subtitle-renderer-cue-window{visibility:hidden!important}');
+  function hideNative(root) {
+    try {
+      if (!root.adoptedStyleSheets.includes(hideSheet)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, hideSheet];
+    } catch (e) {}
+  }
+  hideNative(document);
+
   function findRoot(root) {
     if (root.querySelector('.hive-subtitle-renderer-wrapper')) return root;
     for (const el of root.querySelectorAll('*')) {
-      if (el.shadowRoot) { const r = findRoot(el.shadowRoot); if (r) return r; }
+      if (!el.shadowRoot) continue;
+      hideNative(el.shadowRoot); // 先掛好，第一句字幕出現前就藏
+      const r = findRoot(el.shadowRoot);
+      if (r) return r;
     }
     return null;
   }
@@ -419,17 +434,15 @@
   function tick() {
     if ((!cueRoot || !cueRoot.querySelector('.hive-subtitle-renderer-wrapper')) && Date.now() - lastScan > 2000) {
       lastScan = Date.now(); // 整頁掃 shadow DOM 很貴，找不到時 2 秒才再掃
-      cueRoot = findRoot(document);
+      const r = findRoot(document);
+      if (r) cueRoot = r; // 句與句之間找不到就沿用舊的，別清掉
     }
+    if (cueRoot) hideNative(cueRoot); // 防頁面自己重設 adoptedStyleSheets
 
     const v = mainVideo();
     const b = ensureBox();
     if (!v || !b || !cueRoot) { if (b) b.style.display = 'none'; return; }
 
-    // 藏原生字幕：用 visibility 讓文字還在 DOM 裡可讀
-    cueRoot.querySelectorAll('.hive-subtitle-renderer-wrapper').forEach((w) => {
-      if (w.style.visibility !== 'hidden') w.style.visibility = 'hidden';
-    });
 
     const cueEls = [...cueRoot.querySelectorAll('.hive-subtitle-renderer-cue-window')];
     const ptext = cueEls.map((e) => e.innerText || e.textContent).join('\n').trim();
