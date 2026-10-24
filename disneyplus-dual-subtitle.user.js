@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.1
+// @version      1.4.2
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -280,14 +280,15 @@
     primary = secondary = null;
     primaryCues = secondaryCues = [];
     offset = 0; offsetSamples.length = 0;
-    await Promise.all(tracks.map(async (t) => {
-      try {
-        const pl = await getText(t.url);
+    // 各軌清單同時下載；ready 讓 loadCues 等到自己那軌好了才抓。
+    // 不等的話：中文軌先好 → 判定原字幕 → 立刻抓英文，英文清單還沒到就卡死在「載入中」。
+    for (const t of tracks) {
+      t.ready = getText(t.url).then((pl) => {
         t.segUrls = pl.split(/\r?\n/).filter((l) => l && !l.startsWith('#')).map((l) => new URL(l, t.url).href);
         t.segKeys = new Set(t.segUrls.map(segKey));
-      } catch (e) { t.segUrls = []; t.segKeys = new Set(); }
-    }));
-    detectPrimary();
+      }, () => { t.segUrls = []; t.segKeys = new Set(); });
+      t.ready.then(detectPrimary);
+    }
   }
 
   function detectPrimary() {
@@ -336,6 +337,7 @@
 
   async function loadCues(t) {
     const out = [];
+    await t.ready;
     const urls = t.segUrls.slice();
     const worker = async () => {
       while (urls.length) {
@@ -453,6 +455,24 @@
     } catch (e) {}
   }
   hideNative(document);
+  // 新播放器（例如下一集）建 shadow root 的當下就掛好，不等掃描；也記下來，找字幕時先查這些
+  const newRoots = [];
+  const origAttach = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function () {
+    const r = origAttach.apply(this, arguments);
+    hideNative(r);
+    newRoots.push(r);
+    if (newRoots.length > 300) newRoots.shift();
+    return r;
+  };
+  function findInNewRoots() {
+    // 不能把「未接上頁面」的刪掉：元件常先 attachShadow 再插進頁面
+    for (let i = newRoots.length - 1; i >= 0; i--) {
+      const r = newRoots[i];
+      if (r.host.isConnected && r.querySelector('.hive-subtitle-renderer-wrapper')) return r;
+    }
+    return null;
+  }
 
   function findRoot(root) {
     if (root.querySelector('.hive-subtitle-renderer-wrapper')) return root;
@@ -499,6 +519,14 @@
   let lastPrimaryText = '', lastScan = 0;
 
   function tick() {
+    // 下一集 Disney 會換整個新播放器：舊的 shadow root 被移出頁面但裡面還留著字幕元素，
+    // 不檢查 isConnected 會一直讀舊的、新播放器的字幕也沒藏。脫離頁面就立刻重掃。
+    const gone = cueRoot && cueRoot !== document && !cueRoot.host.isConnected;
+    if (gone) { cueRoot = null; lastScan = 0; }
+    if (!cueRoot || !cueRoot.querySelector('.hive-subtitle-renderer-wrapper')) {
+      const r = findInNewRoots(); // 便宜：只查新建過的 shadow root，每 0.1 秒都可以
+      if (r) cueRoot = r;
+    }
     if ((!cueRoot || !cueRoot.querySelector('.hive-subtitle-renderer-wrapper')) && Date.now() - lastScan > 2000) {
       lastScan = Date.now(); // 整頁掃 shadow DOM 很貴，找不到時 2 秒才再掃
       const r = findRoot(document);
