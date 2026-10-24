@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.3.0
+// @version      1.3.1
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、顯示目前畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -474,7 +474,7 @@
   }
   setInterval(tick, 100);
 
-  // ---- 畫質顯示：左上角，滑鼠動時出現 2 秒；Alt+Q 釘選常駐 ----
+  // ---- 畫質顯示：右上角音量膠囊正下方，滑鼠動時出現 2 秒；Alt+Q 釘選常駐 ----
   const KEY_QPIN = 'dpds-qpin';
   let qPinned = store.get(KEY_QPIN) === '1';
   let qBadge, qUntil = 0;
@@ -503,9 +503,9 @@
     if (!document.body) return;
     if (!qBadge) {
       qBadge = document.createElement('div');
-      qBadge.style.cssText = 'position:fixed;top:16px;left:16px;z-index:2147483647;padding:6px 12px;' +
-        'border-radius:16px;background:rgba(0,0,0,.65);color:#fff;font:13px/1.3 system-ui,sans-serif;' +
-        'pointer-events:none;font-variant-numeric:tabular-nums;display:none';
+      qBadge.style.cssText = 'position:fixed;top:52px;right:16px;z-index:2147483647;padding:6px 12px;' +
+        'border-radius:16px;background:rgba(0,0,0,.65);color:#fff;font:14px/1.2 system-ui,sans-serif;' +
+        'pointer-events:none;font-variant-numeric:tabular-nums;white-space:nowrap;display:none';
     }
     const parent = document.fullscreenElement || document.body;
     if (qBadge.parentNode !== parent) parent.appendChild(qBadge);
@@ -521,7 +521,7 @@
   function toast(msg) {
     if (!tip) {
       tip = document.createElement('div');
-      tip.style.cssText = 'position:fixed;top:56px;right:16px;z-index:2147483647;padding:6px 12px;' +
+      tip.style.cssText = 'position:fixed;top:92px;right:16px;z-index:2147483647;padding:6px 12px;' +
         'border-radius:16px;background:rgba(0,0,0,.7);color:#fff;font:14px/1.3 system-ui,sans-serif;' +
         'pointer-events:none;white-space:pre-line';
     }

@@ -5,7 +5,7 @@ Disney+ 網頁版一支搞定：
 - **音量放大**：100%~600%（預設 250%），接壓縮器防爆音、拉近對白和爆炸聲差距
 - **字幕放大**：比 Disney+ 原生字幕大，可調
 - **雙字幕**：中文上排（粗、大）、英文下排（細、小），貼近畫面底部，暫停時隱藏（排版照自製 Netflix 雙字幕插件）
-- **畫質顯示**：左上角顯示目前解析度、約略位元率、清單最高畫質、掉格數（滑鼠移動時出現，Alt+Q 常駐）
+- **畫質顯示**：右上角音量下方顯示目前解析度、約略位元率、清單最高畫質、掉格數（滑鼠移動時出現，Alt+Q 常駐）
 
 安裝：https://raw.githubusercontent.com/charles0506/disneyplus-dual-subtitle/main/disneyplus-dual-subtitle.user.js
 
