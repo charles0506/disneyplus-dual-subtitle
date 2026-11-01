@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.3
+// @version      1.4.4
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -203,7 +203,9 @@
   let scale = parseFloat(store.get(KEY_SCALE));
   if (!(scale >= 0.5 && scale <= 3)) scale = 1; // 1.2.0 起改成自畫字幕的倍率，換 key 重設
   let dualOn = store.get(KEY_ON) !== '0';
-  let prefLang = store.get(KEY_LANG) || '';
+  // Alt+L 的選擇只留到重新整理；以前存進 localStorage，按過一次就永遠不是英文，舊值順便清掉
+  let prefLang = '';
+  try { localStorage.removeItem(KEY_LANG); } catch (e) {}
 
   const ours = new Set();          // 自己抓的網址，側錄時略過
   const seenM3u8 = new Set();
@@ -211,6 +213,7 @@
   let tracks = [];                 // {lang, name, url, segKeys:Set, segUrls:[]}
   let primary = null, secondary = null;
   let primaryCues = [], secondaryCues = [];
+  let zhExtra = null, zhExtraCues = []; // 原字幕既不是中文也不是英文時，上排另外抓中文軌
   let offset = 0;
   const offsetSamples = [];
   let variants = [];               // 主清單的畫質檔位 {w, h, bw}
@@ -278,8 +281,8 @@
     if (vs.length) variants = vs;
     if (!list.length) return;
     tracks = list;
-    primary = secondary = null;
-    primaryCues = secondaryCues = [];
+    primary = secondary = zhExtra = null;
+    primaryCues = secondaryCues = zhExtraCues = [];
     offset = 0; offsetSamples.length = 0;
     // 各軌清單同時下載；ready 讓 loadCues 等到自己那軌好了才抓。
     // 不等的話：中文軌先好 → 判定原字幕 → 立刻抓英文，英文清單還沒到就卡死在「載入中」。
@@ -294,7 +297,12 @@
 
   function detectPrimary() {
     if (!tracks.length || !pageVtt.size) return;
-    const p = tracks.find((t) => t.segKeys && [...pageVtt].some((k) => t.segKeys.has(k)));
+    // 從最新載入的分段往回找：中途換過原字幕時，舊語言的分段還留在 pageVtt 裡
+    let p = null;
+    for (const k of [...pageVtt].reverse()) {
+      p = tracks.find((t) => t.segKeys && t.segKeys.has(k));
+      if (p) break;
+    }
     if (!p || p === primary) return;
     primary = p;
     offset = 0; offsetSamples.length = 0;
@@ -305,16 +313,26 @@
   function pickSecondary() {
     if (!primary) return;
     const others = tracks.filter((t) => t !== primary);
-    const auto = /^zh/i.test(primary.lang) ? 'en' : 'zh-Hant';
-    let want = prefLang || auto;
-    let base = want.split('-')[0].toLowerCase();
-    if (base === primary.lang.split('-')[0].toLowerCase()) { want = auto; base = want.split('-')[0].toLowerCase(); }
-    const s = others.find((t) => t.lang.toLowerCase() === want.toLowerCase()) ||
-      others.find((t) => t.lang.toLowerCase().split('-')[0] === base) || others[0];
-    if (!s || s === secondary) return;
+    const find = (want) => {
+      const base = want.split('-')[0].toLowerCase();
+      return others.find((t) => t.lang.toLowerCase() === want.toLowerCase()) ||
+        others.find((t) => t.lang.toLowerCase().split('-')[0] === base) || null;
+    };
+    const auto = /^en/i.test(primary.lang) ? 'zh-Hant' : 'en';
+    // 片子沒有要的語言就不顯示，不拿清單第一軌頂替（那會跑出捷克文、阿拉伯文之類）
+    const s = (prefLang && prefLang.split('-')[0].toLowerCase() !== primary.lang.split('-')[0].toLowerCase() && find(prefLang)) || find(auto);
+
+    const zx = /^(zh|en)/i.test(primary.lang) ? null : find('zh-Hant');
+    if (zx !== zhExtra) {
+      zhExtra = zx;
+      zhExtraCues = [];
+      if (zx) loadCues(zx).then((c) => { if (zhExtra === zx) zhExtraCues = c; });
+    }
+
+    if (s === secondary) return;
     secondary = s;
     secondaryCues = [];
-    loadCues(s).then((c) => { if (secondary === s) secondaryCues = c; });
+    if (s) loadCues(s).then((c) => { if (secondary === s) secondaryCues = c; });
   }
 
   // ---- WebVTT ----
@@ -581,12 +599,15 @@
     lastPrimaryText = ptext;
 
     const t = v.currentTime + offset;
-    const stext = dualOn ? secondaryCues.filter((c) => c.start <= t && t < c.end).map((c) => c.text).join('\n') : '';
+    const cuesAt = (cues) => (dualOn ? cues.filter((c) => c.start <= t && t < c.end).map((c) => c.text).join('\n') : '');
+    const stext = cuesAt(secondaryCues);
 
-    // 中文永遠在上排：原字幕是中文 → 上原下副；原字幕是英文 → 上副下原
+    // 中文永遠在上排：原字幕是中文 → 上原下副；原字幕是英文 → 上副下原；
+    // 其他語言（日文等）→ 原字幕不畫，上中文軌下英文軌，關第二字幕時才退回顯示原字幕
     const primaryZh = !primary || /^zh/i.test(primary.lang);
-    const zhText = primaryZh ? ptext : stext;
-    const otherText = primaryZh ? stext : ptext;
+    const primaryEn = !!primary && /^en/i.test(primary.lang);
+    const zhText = primaryZh ? ptext : primaryEn ? stext : cuesAt(zhExtraCues);
+    const otherText = primaryZh ? stext : primaryEn || !dualOn ? ptext : stext;
 
     if (v.paused || (!zhText && !otherText)) { b.style.display = 'none'; return; }
 
@@ -747,7 +768,7 @@
 
   function status() {
     const p = primary ? primary.name : '（尚未偵測到）';
-    const s = secondary ? `${secondary.name}${secondaryCues.length ? '' : '（載入中）'}` : '無';
+    const s = secondary ? `${secondary.name}（${secondary.lang}）${secondaryCues.length ? '' : '載入中'}` : '無（這部片沒有對應語言或清單未取得）';
     return `字幕 ${Math.round(scale * 100)}%\n原字幕：${p}\n第二字幕：${dualOn ? s : '關閉'}`;
   }
 
@@ -763,7 +784,6 @@
         const i = others.indexOf(secondary);
         const next = others[(i + 1) % others.length];
         prefLang = next.lang;
-        store.set(KEY_LANG, prefLang);
         secondary = null;
         pickSecondary();
       }
