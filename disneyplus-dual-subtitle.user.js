@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.6
+// @version      1.4.7
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -210,7 +210,10 @@
   const ours = new Set();          // 自己抓的網址，側錄時略過
   const seenM3u8 = new Set();
   const pageVtt = new Set();       // 頁面自己載的 vtt（用 key 比對）
-  let tracks = [];                 // {lang, name, url, segKeys:Set, segUrls:[]}
+  const masters = [];              // 看過的每份主清單 {tracks, variants}
+  const masterSizes = [];          // 診斷用：每份主清單有幾個字幕軌
+  let lastSrc = '';                // 影片來源換了＝下一集或廣告，舊字幕不能留著
+  let tracks = [];                 // 正在播的那份主清單：{lang, name, url, segKeys:Set, segUrls:[]}
   let primary = null, secondary = null;
   let primaryCues = [], secondaryCues = [];
   let zhExtra = null, zhExtraCues = []; // 原字幕既不是中文也不是英文時，上排另外抓中文軌
@@ -267,7 +270,7 @@
       if (!/^(SUBTITLES|CLOSED-CAPTIONS)$/.test(a.TYPE) || !a.URI || a.FORCED === 'YES' || /forced/i.test(a.NAME || '')) continue;
       // Disney 的英文可能只有「English [CC]」，語言代碼不一定是 en，名字有 English 就當英文
       const lang = /english/i.test(a.NAME || '') ? 'en' : a.LANGUAGE || '';
-      if (list.some((t) => t.lang === lang)) continue;
+      if (lang === 'zxx' || list.some((t) => t.lang === lang)) continue; // zxx＝無語言內容
       list.push({ lang, name: a.NAME || lang, url: new URL(a.URI, url).href });
     }
     // 畫質檔位（#EXT-X-STREAM-INF）：顯示用，讀的是改寫前的原始清單
@@ -280,15 +283,16 @@
       const m = /^(\d+)x(\d+)$/.exec(a.RESOLUTION || '');
       if (m) vs.push({ w: +m[1], h: +m[2], bw: +(a['AVERAGE-BANDWIDTH'] || a.BANDWIDTH) || 0 });
     });
-    if (vs.length) variants = vs;
+    masterSizes.push(list.length);
+    if (vs.length && !tracks.length) variants = vs;
     if (!list.length) return;
-    tracks = list;
-    primary = secondary = zhExtra = null;
-    primaryCues = secondaryCues = zhExtraCues = [];
-    offset = 0; offsetSamples.length = 0;
+    // 頁面會陸續看到好幾份主清單（片頭、廣告、下一集…），後來的不能蓋掉正片那份。
+    // 全部留著，等 detectPrimary 用頁面實際載入的字幕分段認出在播哪一份才切換。
+    masters.push({ tracks: list, variants: vs });
+    if (masters.length > 8) masters.shift();
     // 各軌清單同時下載；ready 讓 loadCues 等到自己那軌好了才抓。
     // 不等的話：中文軌先好 → 判定原字幕 → 立刻抓英文，英文清單還沒到就卡死在「載入中」。
-    for (const t of tracks) {
+    for (const t of list) {
       t.ready = getText(t.url).then((pl) => {
         t.segUrls = pl.split(/\r?\n/).filter((l) => l && !l.startsWith('#')).map((l) => new URL(l, t.url).href);
         t.segKeys = new Set(t.segUrls.map(segKey));
@@ -298,14 +302,23 @@
   }
 
   function detectPrimary() {
-    if (!tracks.length || !pageVtt.size) return;
+    if (!masters.length || !pageVtt.size) return;
     // 從最新載入的分段往回找：中途換過原字幕時，舊語言的分段還留在 pageVtt 裡
-    let p = null;
+    let p = null, pm = null;
     for (const k of [...pageVtt].reverse()) {
-      p = tracks.find((t) => t.segKeys && t.segKeys.has(k));
+      for (let i = masters.length - 1; i >= 0 && !p; i--) {
+        p = masters[i].tracks.find((t) => t.segKeys && t.segKeys.has(k));
+        if (p) pm = masters[i];
+      }
       if (p) break;
     }
     if (!p || p === primary) return;
+    if (pm.tracks !== tracks) {
+      tracks = pm.tracks;
+      if (pm.variants.length) variants = pm.variants;
+      secondary = zhExtra = null;
+      secondaryCues = zhExtraCues = [];
+    }
     primary = p;
     offset = 0; offsetSamples.length = 0;
     loadCues(p).then((c) => { if (primary === p) primaryCues = c; });
@@ -585,6 +598,16 @@
     const b = ensureBox();
     if (!v || !b || !cueRoot) { if (b) b.style.display = 'none'; return; }
 
+    if (v.currentSrc !== lastSrc) {
+      if (lastSrc) {
+        // 下一個新載入的字幕分段會讓 detectPrimary 重新認軌
+        primary = secondary = zhExtra = null;
+        primaryCues = secondaryCues = zhExtraCues = [];
+        offset = 0; offsetSamples.length = 0;
+      }
+      lastSrc = v.currentSrc;
+    }
+
 
     const cueEls = [...cueRoot.querySelectorAll('.hive-subtitle-renderer-cue-window')];
     const ptext = cueEls.map((e) => e.innerText || e.textContent).join('\n').trim();
@@ -813,10 +836,11 @@
     const via = { fetch: 'fetch（可鎖畫質）', xhr: 'XHR（可鎖畫質）', '': '側錄（無法鎖畫質）' }[masterVia];
     const lock = lockMax ? (lockApplied ? '已套用' : '開，但未生效') : '關';
     toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
-      (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
+      (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${masters.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
       `\n版權保護：${drmUsed || '尚未偵測到'}` +
       `\n攔截：fetch ${diag.fetch}｜XHR ${diag.xhr}｜JSON 內清單 ${diag.jsonLists}｜看過清單 ${seenM3u8.size}｜字幕軌 ${tracks.length}` +
       `\n清單語言：${tracks.map((t) => t.lang).join(' ') || '無'}` +
+      `\n各主清單字幕軌數：${masterSizes.join(' ') || '無'}` +
       `\n腳本版本：${typeof GM_info !== 'undefined' ? GM_info.script.version : '未知'}` : ''));
   }, true);
 })();
