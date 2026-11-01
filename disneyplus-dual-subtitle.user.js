@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.7
+// @version      1.4.8
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -650,7 +650,7 @@
     botEl.style.fontSize = Math.round(zhPx * 0.72) + 'px';
     b.style.width = Math.round(vr.width * 0.92) + 'px';
     b.style.left = Math.round(vr.left + vr.width / 2) + 'px';
-    b.style.bottom = Math.round(window.innerHeight - vr.bottom + vr.height * 0.08) + 'px';
+    b.style.bottom = Math.round(window.innerHeight - vr.bottom + vr.height * 0.03) + 'px';
     b.style.display = 'block';
   }
   setInterval(tick, 100);
