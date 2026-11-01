@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.2
+// @version      1.4.3
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -10,6 +10,7 @@
 // @match        https://www.disneyplus.com/*
 // @run-at       document-start
 // @grant        none
+// @sandbox      raw
 // ==/UserScript==
 
 // 兩個獨立區塊：上半音量增強、下半雙字幕＋字幕放大（各自一個閉包，互不共用變數）
@@ -396,13 +397,27 @@
     return t2;
   }
 
+  // 主清單不一定會被頁面直接下載（可能在 Worker 裡），但網址會出現在播放 API 的 JSON 回應中
+  const diag = { fetch: 0, xhr: 0, jsonLists: 0 };
+  function scanForLists(t) {
+    if (typeof t !== 'string' || t.length > 5e6 || !t.includes('.m3u8')) return;
+    const found = t.match(/https?:[^"'\s]+?\.m3u8[^"'\s]*/g) || [];
+    for (const raw of new Set(found)) {
+      const u = raw.replace(/\\\//g, '/').replace(/\\u0026/g, '&');
+      diag.jsonLists++;
+      onM3u8(u);
+    }
+  }
+
   const origFetch = window.fetch;
   window.fetch = function (input) {
     const p = origFetch.apply(this, arguments);
     const url = typeof input === 'string' ? input : input && input.url;
+    diag.fetch++;
     if (!url || ours.has(url)) return p;
     return p.then(async (r) => {
       const ct = r.headers.get('content-type') || '';
+      if (/json/i.test(ct)) { r.clone().text().then(scanForLists).catch(() => {}); return r; }
       if (!/mpegurl|m3u8/i.test(ct + url)) return r;
       let t;
       try { t = await r.clone().text(); } catch (e) { return r; }
@@ -433,8 +448,16 @@
       Object.defineProperty(xhr, 'responseText', { configurable: true, get() { return fix(xhrText.get.call(xhr)); } });
       Object.defineProperty(xhr, 'response', { configurable: true, get() { return fix(xhrResp.get.call(xhr)); } });
     } catch (e) {}
+    diag.xhr++;
     xhr.addEventListener('load', () => {
-      try { if (xhr.responseType === '' || xhr.responseType === 'text') void xhr.responseText; } catch (e) {}
+      try {
+        if (xhr.responseType === '' || xhr.responseType === 'text') {
+          const t = xhr.responseText;
+          if (!isMaster(t) && !String(t).startsWith('#EXTM3U')) scanForLists(t);
+        } else if (xhr.responseType === 'json') {
+          scanForLists(JSON.stringify(xhrResp.get.call(xhr)));
+        }
+      } catch (e) {}
     });
     return origOpen.apply(this, arguments);
   };
@@ -765,6 +788,7 @@
     const lock = lockMax ? (lockApplied ? '已套用' : '開，但未生效') : '關';
     toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
       (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
-      `\n版權保護：${drmUsed || '尚未偵測到'}` : ''));
+      `\n版權保護：${drmUsed || '尚未偵測到'}` +
+      `\n攔截：fetch ${diag.fetch}｜XHR ${diag.xhr}｜JSON 內清單 ${diag.jsonLists}｜看過清單 ${seenM3u8.size}｜字幕軌 ${tracks.length}` : ''));
   }, true);
 })();
