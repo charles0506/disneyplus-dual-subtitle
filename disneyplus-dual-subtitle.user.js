@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.4
+// @version      1.4.5
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -341,6 +341,10 @@
     return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1];
   };
 
+  // 字幕檔裡的 &rlm; &amp; 這類符號碼：畫面用 textContent，不解碼會原樣顯示
+  const ENTITIES = { amp: '&', lt: '<', gt: '>', nbsp: ' ', lrm: '‎', rlm: '‏' };
+  const decodeEntities = (s) => s.replace(/&(amp|lt|gt|nbsp|lrm|rlm);/g, (_, k) => ENTITIES[k]);
+
   function parseVtt(text) {
     const cues = [];
     for (const block of text.replace(/\r/g, '').split(/\n\n+/)) {
@@ -348,7 +352,7 @@
       const i = lines.findIndex((l) => l.includes('-->'));
       if (i < 0) continue;
       const [a, b] = lines[i].split('-->');
-      const body = lines.slice(i + 1).join('\n').replace(/<[^>]+>/g, '').trim();
+      const body = decodeEntities(lines.slice(i + 1).join('\n').replace(/<[^>]+>/g, '')).trim();
       if (body) cues.push({ start: toSec(a), end: toSec(b.trim().split(/\s+/)[0]), text: body });
     }
     return cues;
@@ -809,6 +813,8 @@
     toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
       (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${tracks.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
       `\n版權保護：${drmUsed || '尚未偵測到'}` +
-      `\n攔截：fetch ${diag.fetch}｜XHR ${diag.xhr}｜JSON 內清單 ${diag.jsonLists}｜看過清單 ${seenM3u8.size}｜字幕軌 ${tracks.length}` : ''));
+      `\n攔截：fetch ${diag.fetch}｜XHR ${diag.xhr}｜JSON 內清單 ${diag.jsonLists}｜看過清單 ${seenM3u8.size}｜字幕軌 ${tracks.length}` +
+      `\n清單語言：${tracks.map((t) => t.lang).join(' ') || '無'}` +
+      `\n腳本版本：${typeof GM_info !== 'undefined' ? GM_info.script.version : '未知'}` : ''));
   }, true);
 })();
