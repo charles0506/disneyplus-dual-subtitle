@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.5
+// @version      1.4.6
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -259,14 +259,16 @@
     if (text === undefined) {
       try { text = await getText(url); } catch (e) { return; }
     }
-    if (!/#EXT-X-MEDIA:.*TYPE=SUBTITLES/.test(text)) return;
+    if (!/#EXT-X-MEDIA:.*TYPE=(SUBTITLES|CLOSED-CAPTIONS)/.test(text)) return;
     const list = [];
     for (const line of text.split(/\r?\n/)) {
       if (!line.startsWith('#EXT-X-MEDIA:')) continue;
       const a = attrs(line.slice(13));
-      if (a.TYPE !== 'SUBTITLES' || !a.URI || a.FORCED === 'YES') continue;
-      if (list.some((t) => t.lang === a.LANGUAGE)) continue;
-      list.push({ lang: a.LANGUAGE || '', name: a.NAME || a.LANGUAGE, url: new URL(a.URI, url).href });
+      if (!/^(SUBTITLES|CLOSED-CAPTIONS)$/.test(a.TYPE) || !a.URI || a.FORCED === 'YES' || /forced/i.test(a.NAME || '')) continue;
+      // Disney 的英文可能只有「English [CC]」，語言代碼不一定是 en，名字有 English 就當英文
+      const lang = /english/i.test(a.NAME || '') ? 'en' : a.LANGUAGE || '';
+      if (list.some((t) => t.lang === lang)) continue;
+      list.push({ lang, name: a.NAME || lang, url: new URL(a.URI, url).href });
     }
     // 畫質檔位（#EXT-X-STREAM-INF）：顯示用，讀的是改寫前的原始清單
     if (!seenMasterText.has(text)) { seenMasterText.add(text); samples = []; playSec = 0; firstMaxSec = null; }
