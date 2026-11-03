@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Disney+ 增強（音量＋雙字幕＋字幕放大）
 // @namespace    https://github.com/charles0506/disneyplus-dual-subtitle
-// @version      1.4.8
+// @version      1.4.9
 // @description  Disney+ 音量放大（壓縮器防爆音）、字幕放大、中英雙字幕（中文上排、英文下排）、畫質曲線圖與鎖定最高畫質
 // @homepageURL  https://github.com/charles0506/disneyplus-dual-subtitle
 // @supportURL   https://github.com/charles0506/disneyplus-dual-subtitle/issues
@@ -380,13 +380,29 @@
     const worker = async () => {
       while (urls.length) {
         const u = urls.shift();
-        try { out.push(...parseVtt(await getText(u))); } catch (e) {}
+        try {
+          const cues = parseVtt(await getText(u));
+          // 分段檔名 pts_<毫秒> 是這段的起點。cue 時間理應是整片絕對時間；
+          // 若整段 cue 都遠早於起點，代表是相對時間，補上起點
+          const m = /pts_(\d+)/.exec(u), pts = m ? +m[1] / 1000 : 0;
+          const rel = pts > 30 && cues.length && Math.max(...cues.map((c) => c.end)) < pts - 30;
+          if (rel) { timing.rel++; cues.forEach((c) => { c.start += pts; c.end += pts; }); } else if (cues.length) timing.abs++;
+          out.push(...cues);
+        } catch (e) {}
       }
     };
     await Promise.all([worker(), worker(), worker(), worker()]);
     out.sort((x, y) => x.start - y.start);
-    return out;
+    // 跨分段的句子會在前後兩段各出現一次，不去重會同一句疊兩行
+    const seen = new Set();
+    return out.filter((c) => {
+      const k = `${c.start.toFixed(2)}|${c.end.toFixed(2)}|${c.text}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   }
+  const timing = { abs: 0, rel: 0 };
 
   // ---- 側錄網址 ----
   function onEntry(name) {
@@ -577,6 +593,7 @@
 
   const norm = (s) => s.replace(/\s+/g, '');
   let lastPrimaryText = '', lastScan = 0;
+  let manualShift = 0; // Alt+[ / Alt+] 手動調第二字幕：正數＝延後出現
 
   function tick() {
     // 下一集 Disney 會換整個新播放器：舊的 shadow root 被移出頁面但裡面還留著字幕元素，
@@ -627,7 +644,7 @@
     }
     lastPrimaryText = ptext;
 
-    const t = v.currentTime + offset;
+    const t = v.currentTime + offset - manualShift;
     const cuesAt = (cues) => (dualOn ? cues.filter((c) => c.start <= t && t < c.end).map((c) => c.text).join('\n') : '');
     const stext = cuesAt(secondaryCues);
 
@@ -807,6 +824,12 @@
     if (k === '=' || k === '+') scale = Math.min(3, +(scale + 0.1).toFixed(1));
     else if (k === '-') scale = Math.max(0.5, +(scale - 0.1).toFixed(1));
     else if (k === 's') { dualOn = !dualOn; store.set(KEY_ON, dualOn ? '1' : '0'); }
+    else if (k === '[' || k === ']') {
+      manualShift = +(manualShift + (k === ']' ? 0.25 : -0.25)).toFixed(2);
+      e.preventDefault(); e.stopPropagation();
+      toast(`第二字幕${manualShift > 0 ? '延後' : manualShift < 0 ? '提早' : '不調整'} ${Math.abs(manualShift).toFixed(2)} 秒`);
+      return;
+    }
     else if (k === 'l') {
       const others = tracks.filter((t) => t !== primary);
       if (others.length) {
@@ -835,7 +858,9 @@
     e.preventDefault(); e.stopPropagation();
     const via = { fetch: 'fetch（可鎖畫質）', xhr: 'XHR（可鎖畫質）', '': '側錄（無法鎖畫質）' }[masterVia];
     const lock = lockMax ? (lockApplied ? '已套用' : '開，但未生效') : '關';
-    toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正）` +
+    const spread = offsetSamples.length ? `，各筆 ${offsetSamples.map((x) => x.toFixed(1)).join(' ')}` : '';
+    toast(status() + (k === 'd' ? `\n時間差：${offset.toFixed(2)} 秒（${offsetSamples.length} 筆校正${spread}）｜手動 ${manualShift} 秒` +
+      `\n字幕分段時間：絕對 ${timing.abs}｜相對已修正 ${timing.rel}` +
       (qualityText() ? '\n' + qualityText() : '') + `\n主清單來源：${masters.length ? via : '尚未取得'}\n鎖定最高畫質：${lock}` +
       `\n版權保護：${drmUsed || '尚未偵測到'}` +
       `\n攔截：fetch ${diag.fetch}｜XHR ${diag.xhr}｜JSON 內清單 ${diag.jsonLists}｜看過清單 ${seenM3u8.size}｜字幕軌 ${tracks.length}` +
